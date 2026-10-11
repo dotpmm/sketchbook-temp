@@ -1,20 +1,25 @@
 /**
- * Mobile framing for the Singapore sketchbook.
+ * Mobile framing for the Singapore sketchbook (opt-in toggle).
  *
  * The authored page renders the open spread as DOM inside an iframe and fits
  * the whole spread to the viewport width, which makes each page tiny on
- * phones. On narrow viewports this layer widens the book so one page roughly
- * fills the viewport and lets a horizontal touch drag pan across the spread.
+ * phones. This layer adds a "Mobile" button to the toolbar: switched on, the
+ * book widens so one page roughly fills the viewport (opening on the left
+ * page) and a horizontal touch drag pans across the spread. Switched off —
+ * the default — the original full-spread view and gestures are untouched.
  *
- * Everything here is scoped to `(max-width: 640px)` — the breakpoint the
- * authored page already uses for its mobile rules — and touch pointers only.
- * Desktop (mouse/pen, wide viewports) keeps the authored behavior untouched.
+ * Everything is scoped to `(max-width: 640px)` — the breakpoint the authored
+ * page already uses for its mobile rules. The button itself is hidden outside
+ * that breakpoint and panning only answers to touch pointers, so the desktop
+ * toolbar, spread, and interactions stay pixel-identical to the original.
  * The packaged HTML, assets, and ThreeUI sources are never modified; this
- * runs through the frame's `applyScene` seam and only appends one <style>
- * and a few listeners inside the live frame.
+ * runs through the frame's `applyScene` seam and only appends one <style>,
+ * one toolbar button, and a few listeners inside the live frame.
  */
 
 const STYLE_ID = "meng-mobile-pan";
+const BUTTON_ID = "mobileBtn";
+const FOCUS_ATTR = "data-meng-mobile";
 
 /**
  * One page (~half the spread) fills the viewport when the book is this wide
@@ -27,22 +32,34 @@ const TAP_SLOP = 10;
 
 const MOBILE_QUERY = "(max-width: 640px)";
 
-const MOBILE_CSS = `@media ${MOBILE_QUERY} {
-  /* Left-align the widened book so the initial view is the left page;
-     the stage clips the overflow into a pan viewport. */
-  #sbStage {
-    justify-content: flex-start;
-    overflow: hidden;
-  }
-  #sbStage > #sb3d {
-    flex: none;
-    width: ${BOOK_WIDTH_PCT}%;
-    max-width: none;
-  }
-}
-/* Panning is direct manipulation (no transitions), so there is nothing
-   to gate behind prefers-reduced-motion. Tap-to-turn reuses the authored
-   arrow buttons, which already respect the page's reduced-motion path. */`;
+const MOBILE_CSS = [
+  "#" + BUTTON_ID + "{display:none}",
+  "@media " + MOBILE_QUERY + " {",
+  "  /* The toggle lives beside the zoom controls, mobile only. */",
+  "  #" + BUTTON_ID + "{display:inline-flex}",
+  "  #" + BUTTON_ID + '[aria-pressed="true"]{background:rgba(154,106,62,.16);color:var(--earth)}',
+  "  /* Left-align the widened book so the focused view opens on the left page;",
+  "     the stage clips the overflow into a pan viewport. Off by default. */",
+  '  html[' + FOCUS_ATTR + '="on"] #sbStage {',
+  "    justify-content: flex-start;",
+  "    overflow: hidden;",
+  "  }",
+  "  html[" + FOCUS_ATTR + '="on"] #sbStage > #sb3d {',
+  "    flex: none;",
+  "    width: " + BOOK_WIDTH_PCT + "%;",
+  "    max-width: none;",
+  "  }",
+  "}",
+  "/* Panning is direct manipulation (no transitions), so there is nothing",
+  "   to gate behind prefers-reduced-motion. Tap-to-turn reuses the authored",
+  "   arrow buttons, which already respect the page's reduced-motion path. */",
+].join("\n");
+
+const BUTTON_SVG =
+  '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">' +
+  '<rect x="6" y="2.5" width="8" height="15" rx="2.2"/>' +
+  '<path d="M8.8 5.2h2.4"/>' +
+  "</svg>";
 
 type PanState = {
   pointerId: number;
@@ -70,7 +87,7 @@ function ensureStyle(doc: Document): void {
 }
 
 /** Clamp a pan offset so the book edges meet the stage edges, never beyond. */
-function clampPan(stage: HTMLElement, book: HTMLElement, sb3d: HTMLElement, tx: number): number {
+function clampPan(stage: HTMLElement, book: HTMLElement, tx: number): number {
   const stageW = stage.clientWidth;
   const bookW = book.getBoundingClientRect().width;
   const overflow = bookW - stageW;
@@ -79,7 +96,7 @@ function clampPan(stage: HTMLElement, book: HTMLElement, sb3d: HTMLElement, tx: 
 }
 
 function setPan(sb3d: HTMLElement, tx: number): void {
-  sb3d.style.transform = tx ? `translate3d(${tx.toFixed(1)}px,0,0)` : "";
+  sb3d.style.transform = tx ? "translate3d(" + tx.toFixed(1) + "px,0,0)" : "";
 }
 
 function currentPan(sb3d: HTMLElement): number {
@@ -89,7 +106,8 @@ function currentPan(sb3d: HTMLElement): number {
 
 /**
  * Idempotent: safe to run on every frame load and every `applyScene` call.
- * Attaches one capture-phase gesture handler to the authored stage.
+ * Adds the toolbar toggle and one capture-phase gesture handler to the
+ * authored stage.
  */
 export function applyMobileSketchbookPan(frame: HTMLIFrameElement | null): void {
   let doc: Document | null = null;
@@ -110,13 +128,42 @@ export function applyMobileSketchbookPan(frame: HTMLIFrameElement | null): void 
   stage.dataset.mengPan = "1";
 
   let tracking: PanState | null = null;
+  let focusOn = false;
 
   const mobile = () => isMobile(win);
+  const root = doc.documentElement;
+
+  const setFocus = (on: boolean) => {
+    focusOn = on;
+    tracking = null;
+    if (on) root.setAttribute(FOCUS_ATTR, "on");
+    else {
+      root.removeAttribute(FOCUS_ATTR);
+      setPan(sb3d, 0);
+    }
+    const btn = doc?.getElementById(BUTTON_ID) as HTMLButtonElement | null;
+    btn?.setAttribute("aria-pressed", String(on));
+  };
+
+  // The toggle sits beside the zoom controls. The toolbar is static markup
+  // (paint() only rebuilds the book), so one button + listener lasts.
+  const zIn = doc.getElementById("zIn") as HTMLButtonElement | null;
+  if (zIn && !doc.getElementById(BUTTON_ID)) {
+    const btn = doc.createElement("button");
+    btn.className = "tool";
+    btn.id = BUTTON_ID;
+    btn.setAttribute("aria-label", "Mobile view");
+    btn.setAttribute("title", "Mobile view");
+    btn.setAttribute("aria-pressed", "false");
+    btn.innerHTML = BUTTON_SVG;
+    btn.addEventListener("click", () => setFocus(!focusOn));
+    zIn.parentElement?.insertBefore(btn, zIn.nextSibling);
+  }
 
   const resetToDesktop = () => {
     tracking = null;
     if (!mobile()) setPan(sb3d, 0);
-    else setPan(sb3d, clampPan(stage, book, sb3d, currentPan(sb3d)));
+    else if (focusOn) setPan(sb3d, clampPan(stage, book, currentPan(sb3d)));
   };
 
   win?.addEventListener("resize", resetToDesktop);
@@ -125,10 +172,10 @@ export function applyMobileSketchbookPan(frame: HTMLIFrameElement | null): void 
     "pointerdown",
     (e) => {
       if (e.button !== 0 || e.isPrimary === false) return;
-      // Only touch drags on the page-turn surface are panned. Mouse/pen,
-      // the loupe, arrows, and tools keep their authored behavior, and
-      // wide viewports keep the desktop spread untouched.
-      if (e.pointerType !== "touch" || !mobile()) return;
+      // Only touch drags on the page-turn surface pan, and only while the
+      // Mobile toggle is on. Everything else — mouse/pen, the loupe, arrows,
+      // tools, wide viewports, toggle off — keeps authored behavior.
+      if (e.pointerType !== "touch" || !mobile() || !focusOn) return;
       // NOTE: no `instanceof Element` check here — this callback runs in the
       // parent window's realm, where cross-realm `instanceof` is always false
       // for nodes inside the frame. A `closest` capability check is realm-safe.
@@ -178,7 +225,7 @@ export function applyMobileSketchbookPan(frame: HTMLIFrameElement | null): void 
         if (Math.abs(dx) <= TAP_SLOP) return;
         tracking.panning = true;
       }
-      const tx = clampPan(stage, book, sb3d, tracking.pan0 + dx);
+      const tx = clampPan(stage, book, tracking.pan0 + dx);
       setPan(sb3d, tx);
     },
     { capture: true },
@@ -192,7 +239,7 @@ export function applyMobileSketchbookPan(frame: HTMLIFrameElement | null): void 
     if (t.panning) {
       // End of a pan: stay where the finger left the spread. No snap or
       // animation — direct manipulation only.
-      setPan(sb3d, clampPan(stage, book, sb3d, currentPan(sb3d)));
+      setPan(sb3d, clampPan(stage, book, currentPan(sb3d)));
       return;
     }
     // A tap (no real movement): turn the page like the authored tap does,
